@@ -171,6 +171,20 @@
             window.speechSynthesis.speak(utterance);
         }
 
+        // --- Validation API Check ---
+        async function verifyApiKey(key) {
+            if (!key) return { ok: false, status: "Empty" };
+            // Use gemini-1.5-flash for broader compatibility
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`;
+            try {
+                const response = await fetch(url, {
+                    method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ contents: [{ parts: [{ text: "hi" }] }] })
+                });
+                return { ok: response.ok, status: response.status };
+            } catch (e) { return { ok: false, status: "Network Error" }; }
+        }
+
         async function fetchGeminiTTS(text, apiKey) {
             if (!apiKey) throw new Error("No API Key");
             if (Date.now() < apiRateLimitedUntil) throw new Error("RATE_LIMIT");
@@ -183,6 +197,7 @@
                     body: JSON.stringify({ contents: [{ parts: [{ text: text }] }], generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } } } } })
                 });
                 if (response.status === 429) { apiRateLimitedUntil = Date.now() + 60000; throw new Error("RATE_LIMIT"); }
+                if (!response.ok) throw new Error(`API_ERROR_${response.status}`);
                 const data = await response.json();
                 const audio = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
                 if (!audio) throw new Error("NO_AUDIO");
@@ -194,8 +209,10 @@
         const CURRICULUM_CONTEXT = Object.values(LEVELS).map(l => `Level ${l.id} (${l.subTitle}): ${l.sentences.map(s=>s.en).join(', ')}.`).join('\n');
 
         async function fetchGeminiChatResponse(history, apiKey) {
+            if (!apiKey) return "請輸入 API Key 才能使用 AI 家教功能。";
             if (Date.now() < apiRateLimitedUntil) return "系統忙碌中 (System Busy)...";
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+            // Use 1.5 Flash for better compatibility
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
             const systemPrompt = `Role: Warm bilingual (Traditional Chinese & English) Medical English Tutor for an elderly beginner in Canada.
             Curriculum: ${CURRICULUM_CONTEXT}
             Method: Chat naturally in Chinese mostly. Teach specific phrases from curriculum. Correct mistakes gently. Praise often.`;
@@ -210,8 +227,9 @@
         }
 
         async function fetchGeminiQuiz(levelInfo, apiKey) {
-            if (Date.now() < apiRateLimitedUntil) return getFallbackQuiz(levelInfo);
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+            if (!apiKey || Date.now() < apiRateLimitedUntil) return getFallbackQuiz(levelInfo);
+            // Use 1.5 Flash for better compatibility
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
             const randomSentence = levelInfo.sentences[Math.floor(Math.random() * levelInfo.sentences.length)];
             const prompt = `Create a multiple-choice question for a senior patient to practice saying: "${randomSentence.en}" (${randomSentence.cn}).
             Output JSON: {"doctorSaysEn": "...", "doctorSaysCn": "...", "options": [{"en": "${randomSentence.en}", "cn": "${randomSentence.cn}", "isCorrect": true}, {"en": "...", "cn": "...", "isCorrect": false}, {"en": "...", "cn": "...", "isCorrect": false}]}`;
@@ -240,10 +258,61 @@
 
         // --- React Components ---
         
-        function ApiKeyModal({ isOpen, onSave }) {
+        function ApiKeyModal({ isOpen, onSave, hasKey }) {
             const [val, setVal] = useState("");
+            const [checking, setChecking] = useState(false);
+            const [error, setError] = useState("");
+
+            useEffect(() => { if (!isOpen) { setVal(""); setError(""); } }, [isOpen]);
+
+            const handleSave = async () => {
+                if (!val.trim()) { setError("請輸入 API Key"); return; }
+                setChecking(true); setError("");
+                const result = await verifyApiKey(val.trim());
+                setChecking(false);
+                if (result.ok) {
+                    onSave(val.trim());
+                } else {
+                    setError(`API Key 無效 (錯誤碼: ${result.status})，請檢查。`);
+                }
+            };
+
+            const handleForceSave = () => {
+                // Allows user to bypass check if they are confident
+                if (val.trim()) onSave(val.trim());
+            };
+
+            const handleSkip = () => {
+                onSave(""); 
+            };
+
             if (!isOpen) return null;
-            return <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4"><div className="bg-white rounded-2xl p-6 w-full max-w-md text-center"><i className="fa-solid fa-key text-4xl text-orange-600 mb-4"></i><h2 className="text-2xl font-bold mb-2">歡迎使用！</h2><p className="mb-4">請輸入 Google Gemini API Key 啟用功能。</p><input value={val} onChange={e=>setVal(e.target.value)} placeholder="API Key..." className="w-full p-3 border-2 rounded-xl mb-4" /><button onClick={()=>onSave(val)} className="w-full bg-orange-600 text-white py-3 rounded-xl font-bold btn-active">開始使用</button></div></div>;
+            return (
+                <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl p-6 w-full max-w-md text-center">
+                        <i className="fa-solid fa-key text-4xl text-orange-600 mb-4"></i>
+                        <h2 className="text-2xl font-bold mb-2">{hasKey ? "更換 API Key" : "歡迎使用！"}</h2>
+                        <p className="mb-4 text-gray-600 text-sm">請輸入 Google Gemini API Key 以啟用「AI 真人語音」與「AI 家教」。</p>
+                        <input value={val} onChange={e=>{setVal(e.target.value); setError("");}} placeholder="貼上 API Key..." className="w-full p-3 border-2 rounded-xl mb-2 focus:border-orange-500 outline-none" />
+                        {error && <div className="text-red-500 text-sm mb-3 text-left bg-red-50 p-2 rounded"><i className="fa-solid fa-circle-exclamation mr-1"></i>{error}</div>}
+                        
+                        <div className="flex flex-col gap-2">
+                            <button onClick={handleSave} disabled={checking} className="w-full bg-orange-600 text-white py-3 rounded-xl font-bold btn-active disabled:bg-gray-400">
+                                {checking ? <span><i className="fa-solid fa-spinner fa-spin mr-1"></i> 驗證中...</span> : "確認並開始"}
+                            </button>
+                            {error && (
+                                <button onClick={handleForceSave} className="w-full text-orange-600 py-2 rounded-xl font-medium text-sm underline">
+                                    我確定 Key 是對的，強制進入
+                                </button>
+                            )}
+                            <button onClick={handleSkip} className="w-full bg-gray-100 text-gray-500 py-3 rounded-xl font-medium btn-active">
+                                {hasKey ? "取消" : "略過 (不使用 AI)"}
+                            </button>
+                        </div>
+                        {!hasKey && <p className="mt-4 text-xs text-gray-400">沒有 Key 仍可使用基本單字與測驗功能。</p>}
+                    </div>
+                </div>
+            );
         }
 
         function AudioPlayer({ text, apiKey, speed, size=24, className="" }) {
@@ -254,7 +323,8 @@
             const play = async (e) => {
                 if (e) e.stopPropagation();
                 if (loading) return;
-                if (isChinese) { speakWithBrowser(text, speed, 'zh-TW'); return; }
+                // If Chinese or NO API KEY, use browser TTS
+                if (isChinese || !apiKey) { speakWithBrowser(text, speed, isChinese?'zh-TW':'en-US'); return; }
                 setLoading(true);
                 try {
                     const b64 = await fetchGeminiTTS(text, apiKey);
@@ -275,6 +345,7 @@
                 if (!mounted.current) {
                     mounted.current = true;
                     setTimeout(async () => {
+                        if (!apiKey) { speakWithBrowser(text, speed, 'en-US'); return; }
                         try {
                             const b64 = await fetchGeminiTTS(text, apiKey);
                             const bin = atob(b64); const bytes = new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
@@ -300,6 +371,10 @@
             const recognition = useRef(null);
 
             useEffect(() => {
+                if (!apiKey) {
+                    setMsgs([{role:'model', text: "您目前處於離線模式，請點擊首頁右上角的設定圖示輸入 API Key，才能使用 AI 家教喔！"}]);
+                    return;
+                }
                 setLoading(true);
                 fetchGeminiChatResponse([], apiKey).then(res => { setMsgs([{role:'model', text:res}]); setLoading(false); });
                 
@@ -316,7 +391,14 @@
             const send = async () => {
                 if (!input.trim()) return;
                 const newMsg = { role: 'user', text: input };
-                setMsgs(p => [...p, newMsg]); setInput(""); setLoading(true);
+                setMsgs(p => [...p, newMsg]); setInput(""); 
+                
+                if (!apiKey) {
+                    setTimeout(() => setMsgs(p => [...p, {role:'model', text: "請先輸入 API Key 才能對話喔！"}]), 500);
+                    return;
+                }
+
+                setLoading(true);
                 const res = await fetchGeminiChatResponse([...msgs.slice(-6), newMsg], apiKey);
                 setMsgs(p => [...p, { role: 'model', text: res }]); setLoading(false);
             };
@@ -419,43 +501,57 @@
         }
 
         function App() {
-            const [apiKey, setApiKey] = useState(localStorage.getItem("gemini_key") || "");
+            // Check for both legacy 'gemini_key' and possibly empty string from previous skip
+            const [apiKey, setApiKey] = useState(localStorage.getItem("gemini_key"));
+            const [showModal, setShowModal] = useState(false);
             const [view, setView] = useState("home");
             const [level, setLevel] = useState(null);
-            const saveKey = (k) => { setApiKey(k); localStorage.setItem("gemini_key", k); };
+
+            useEffect(() => {
+                if (apiKey === null) setShowModal(true); // First visit
+            }, [apiKey]);
+
+            const saveKey = (k) => { 
+                setApiKey(k); 
+                localStorage.setItem("gemini_key", k); 
+                setShowModal(false); 
+            };
             const selLevel = (l) => { setLevel(l); setView("level-menu"); };
 
             return (
                 <div className="max-w-md mx-auto min-h-screen bg-[#FFF5F5] shadow-2xl relative overflow-hidden">
-                    <ApiKeyModal isOpen={!apiKey} onSave={saveKey} />
-                    {apiKey && (
+                    <ApiKeyModal isOpen={showModal} onSave={saveKey} hasKey={!!apiKey} />
+                    
+                    {view === "home" && (
                         <>
-                            {view === "home" && (
-                                <>
-                                    <div className="bg-orange-600 text-white p-6 rounded-b-3xl shadow mb-2 flex justify-between items-center"><div><h1 className="text-2xl font-bold">早安！Good Morning</h1><p className="opacity-90">醫療英語小助手</p></div><div className="w-12 h-12 bg-white/20 rounded-full flex justify-center items-center text-2xl"><i className="fa-solid fa-user"></i></div></div>
-                                    <div className="p-4 space-y-6">
-                                        <h1 className="text-center text-3xl font-bold text-gray-800 mt-4 mb-4">請選擇課程</h1>
-                                        {Object.values(LEVELS).map(l => (<div key={l.id} onClick={()=>selLevel(l)} className={`${l.color} text-white p-6 rounded-3xl shadow active:scale-95 transition cursor-pointer flex justify-between items-center`}><div><h2 className="text-3xl font-bold mb-1">{l.title.split(":")[1]}</h2><p className="text-white/90 text-lg">{l.subTitle}</p></div><i className="fa-solid fa-chevron-right text-2xl opacity-80"></i></div>))}
-                                        <div onClick={()=>setView('tutor')} className="bg-indigo-600 text-white p-6 rounded-3xl shadow active:scale-95 transition cursor-pointer flex justify-between items-center mt-8"><div><h2 className="text-3xl font-bold mb-1">AI 英文家教</h2><p className="text-white/90 text-lg">一對一對話練習</p></div><div className="bg-white/20 p-3 rounded-full"><i className="fa-solid fa-comments text-2xl"></i></div></div>
-                                    </div>
-                                    <div className="text-center text-gray-400 mt-8 text-sm p-4">Designed for Seniors in Canada 🇨🇦</div>
-                                </>
-                            )}
-                            {view === "level-menu" && level && (
-                                <div className="h-screen flex flex-col p-6">
-                                    <button onClick={()=>setView("home")} className="self-start text-gray-500 mb-6"><i className="fa-solid fa-arrow-left text-xl mr-1"></i>回首頁</button>
-                                    <h2 className="text-3xl font-bold text-gray-800 mb-2">{level.title}</h2><p className="text-gray-500 mb-8 text-lg">{level.subTitle}</p>
-                                    <div className="space-y-4 flex-1">
-                                        <button onClick={()=>setView("learn")} className="w-full bg-white p-8 rounded-3xl shadow flex items-center space-x-6 active:scale-95 transition"><div className="w-16 h-16 bg-orange-100 rounded-2xl flex justify-center items-center text-orange-600 text-3xl"><i className="fa-solid fa-book-open"></i></div><div className="text-left"><h3 className="text-2xl font-bold text-gray-800">單字與句子</h3><p className="text-gray-500 text-lg">基礎練習</p></div></button>
-                                        <button onClick={()=>setView("quiz")} className="w-full bg-white p-8 rounded-3xl shadow flex items-center space-x-6 active:scale-95 transition"><div className="w-16 h-16 bg-blue-100 rounded-2xl flex justify-center items-center text-blue-600 text-3xl"><i className="fa-solid fa-comments"></i></div><div className="text-left"><h3 className="text-2xl font-bold text-gray-800">AI 醫生演練</h3><p className="text-gray-500 text-lg">情境對話測試</p></div></button>
-                                    </div>
+                            <div className="bg-orange-600 text-white p-6 rounded-b-3xl shadow mb-2 flex justify-between items-center">
+                                <div><h1 className="text-2xl font-bold">早安！Good Morning</h1><p className="opacity-90">醫療英語小助手</p></div>
+                                <div className="flex gap-2">
+                                    <button onClick={()=>setShowModal(true)} className="w-10 h-10 bg-white/20 rounded-full flex justify-center items-center text-xl"><i className="fa-solid fa-gear"></i></button>
+                                    <div className="w-10 h-10 bg-white/20 rounded-full flex justify-center items-center text-xl"><i className="fa-solid fa-user"></i></div>
                                 </div>
-                            )}
-                            {view === "learn" && <LearnMode level={level} onBack={()=>setView("level-menu")} apiKey={apiKey} />}
-                            {view === "quiz" && <QuizMode level={level} onBack={()=>setView("level-menu")} apiKey={apiKey} />}
-                            {view === "tutor" && <TutorMode onBack={()=>setView("home")} apiKey={apiKey} />}
+                            </div>
+                            <div className="p-4 space-y-6">
+                                <h1 className="text-center text-3xl font-bold text-gray-800 mt-4 mb-4">請選擇課程</h1>
+                                {Object.values(LEVELS).map(l => (<div key={l.id} onClick={()=>selLevel(l)} className={`${l.color} text-white p-6 rounded-3xl shadow active:scale-95 transition cursor-pointer flex justify-between items-center`}><div><h2 className="text-3xl font-bold mb-1">{l.title.split(":")[1]}</h2><p className="text-white/90 text-lg">{l.subTitle}</p></div><i className="fa-solid fa-chevron-right text-2xl opacity-80"></i></div>))}
+                                <div onClick={()=>setView('tutor')} className="bg-indigo-600 text-white p-6 rounded-3xl shadow active:scale-95 transition cursor-pointer flex justify-between items-center mt-8"><div><h2 className="text-3xl font-bold mb-1">AI 英文家教</h2><p className="text-white/90 text-lg">一對一對話練習</p></div><div className="bg-white/20 p-3 rounded-full"><i className="fa-solid fa-comments text-2xl"></i></div></div>
+                            </div>
+                            <div className="text-center text-gray-400 mt-8 text-sm p-4">Designed for Seniors in Canada 🇨🇦</div>
                         </>
                     )}
+                    {view === "level-menu" && level && (
+                        <div className="h-screen flex flex-col p-6">
+                            <button onClick={()=>setView("home")} className="self-start text-gray-500 mb-6"><i className="fa-solid fa-arrow-left text-xl mr-1"></i>回首頁</button>
+                            <h2 className="text-3xl font-bold text-gray-800 mb-2">{level.title}</h2><p className="text-gray-500 mb-8 text-lg">{level.subTitle}</p>
+                            <div className="space-y-4 flex-1">
+                                <button onClick={()=>setView("learn")} className="w-full bg-white p-8 rounded-3xl shadow flex items-center space-x-6 active:scale-95 transition"><div className="w-16 h-16 bg-orange-100 rounded-2xl flex justify-center items-center text-orange-600 text-3xl"><i className="fa-solid fa-book-open"></i></div><div className="text-left"><h3 className="text-2xl font-bold text-gray-800">單字與句子</h3><p className="text-gray-500 text-lg">基礎練習</p></div></button>
+                                <button onClick={()=>setView("quiz")} className="w-full bg-white p-8 rounded-3xl shadow flex items-center space-x-6 active:scale-95 transition"><div className="w-16 h-16 bg-blue-100 rounded-2xl flex justify-center items-center text-blue-600 text-3xl"><i className="fa-solid fa-comments"></i></div><div className="text-left"><h3 className="text-2xl font-bold text-gray-800">AI 醫生演練</h3><p className="text-gray-500 text-lg">情境對話測試</p></div></button>
+                            </div>
+                        </div>
+                    )}
+                    {view === "learn" && <LearnMode level={level} onBack={()=>setView("level-menu")} apiKey={apiKey} />}
+                    {view === "quiz" && <QuizMode level={level} onBack={()=>setView("level-menu")} apiKey={apiKey} />}
+                    {view === "tutor" && <TutorMode onBack={()=>setView("home")} apiKey={apiKey} />}
                 </div>
             );
         }
